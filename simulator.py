@@ -2595,7 +2595,7 @@ THREEJS_HTML_TEMPLATE = """
         // ALTERNANCIA DE VISTA
         // ================================================================
 
-        function switchView(view) {
+        function switchView(view, fromPyQt = false) {
             currentView = view;
 
             document.getElementById('view-3d').classList.toggle('hidden', view !== '3d');
@@ -2612,6 +2612,11 @@ THREEJS_HTML_TEMPLATE = """
                     drawTrajectory3D();
                 }
                 updateContinentPositions3D(currentAge);
+            }
+
+            // Notificar PyQt para sincronizar radio buttons (se mudou via HTML)
+            if (!fromPyQt) {
+                console.log('VIEW_CHANGED:' + view);
             }
         }
 
@@ -5076,6 +5081,8 @@ class CustomWebPage(QWebEnginePage):
     """WebPage customizada para capturar mensagens de console do JavaScript."""
 
     point_selected = pyqtSignal(float, float)
+    view_changed = pyqtSignal(str)  # Emitido quando usuario troca vista via HTML
+    capture_requested = pyqtSignal(str)
 
     def javaScriptConsoleMessage(self, level, message, line, source):
         """Captura mensagens de console do JavaScript."""
@@ -5095,7 +5102,9 @@ class CustomWebPage(QWebEnginePage):
             tag = message.replace('CAPTURE_SCREENSHOT:', '')
             self.capture_requested.emit(tag)
 
-    capture_requested = pyqtSignal(str)
+        if message.startswith('VIEW_CHANGED:'):
+            view = message.replace('VIEW_CHANGED:', '').strip()
+            self.view_changed.emit(view)
 
 
 class GlobeVisualization(QWidget):
@@ -5104,6 +5113,7 @@ class GlobeVisualization(QWidget):
     journey_started = pyqtSignal(dict)
     point_selected = pyqtSignal(float, float)
     capture_requested = pyqtSignal(str)
+    view_changed = pyqtSignal(str)  # Emitido quando usuario troca vista via botoes HTML
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5117,6 +5127,7 @@ class GlobeVisualization(QWidget):
         self.custom_page = CustomWebPage(self.web_view)
         self.custom_page.point_selected.connect(self.point_selected.emit)
         self.custom_page.capture_requested.connect(self.capture_requested.emit)
+        self.custom_page.view_changed.connect(self.view_changed.emit)
         self.web_view.setPage(self.custom_page)
 
         settings = self.web_view.settings()
@@ -5141,7 +5152,8 @@ class GlobeVisualization(QWidget):
         self.web_view.page().runJavaScript("if(window.resetView) window.resetView();")
 
     def switch_view(self, view: str):
-        js = f"if(window.switchView) window.switchView('{view}');"
+        # fromPyQt=true para evitar loop de notificacao
+        js = f"if(window.switchView) window.switchView('{view}', true);"
         self.web_view.page().runJavaScript(js)
 
     def preview_specimen(self, spec: dict):
@@ -5625,6 +5637,7 @@ class MainWindow(QMainWindow):
         self.visualization.capture_requested.connect(self._on_capture_requested)
         self.panel.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.panel.optimization_changed.connect(self._on_optimization_changed)
+        self.visualization.view_changed.connect(self._on_view_changed_from_html)
 
         # Disparar preset inicial para mostrar na timeline
         self.panel._on_preset_changed(0)
@@ -5684,6 +5697,20 @@ class MainWindow(QMainWindow):
         js = f"if(window.setOptimizations) window.setOptimizations({opts_json});"
         self.visualization.web_view.page().runJavaScript(js)
         self.statusBar().showMessage(f"Otimizações atualizadas: {opts}")
+
+    def _on_view_changed_from_html(self, view: str):
+        """Sincroniza radio buttons do painel quando usuario troca vista via HTML."""
+        # Bloquear sinais para evitar loop
+        self.panel.view_3d_radio.blockSignals(True)
+        self.panel.view_2d_radio.blockSignals(True)
+
+        if view == '3d':
+            self.panel.view_3d_radio.setChecked(True)
+        elif view == '2d':
+            self.panel.view_2d_radio.setChecked(True)
+
+        self.panel.view_3d_radio.blockSignals(False)
+        self.panel.view_2d_radio.blockSignals(False)
 
     def _apply_theme(self):
         palette = QPalette()
