@@ -282,7 +282,7 @@ _setup_qt_environment()
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QComboBox, QLabel, QDoubleSpinBox,
+    QPushButton, QComboBox, QLabel, QDoubleSpinBox, QCheckBox,
     QGroupBox, QFormLayout, QSplitter, QButtonGroup, QRadioButton
 )
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -1205,6 +1205,59 @@ THREEJS_HTML_TEMPLATE = """
         };
 
         let currentRotationModel = 'MULLER2022';
+
+        // ================================================================
+        // FEATURE FLAGS - OTIMIZAÇÕES (controladas pelo painel PyQt)
+        // ================================================================
+        const OPTIMIZATIONS = {
+            preloadCoastlines: false,    // Pré-carregar coastlines ao iniciar
+            preloadAges: false,          // Pré-carregar próximas idades durante animação
+            interpolation: false,        // Usar interpolação bilinear do cache
+            fastRender: false            // Renderização otimizada (simplificar coastlines)
+        };
+
+        // Cache de coastlines pré-carregadas (para otimização)
+        const preloadedCoastlines = {};
+        const PRELOAD_AGES = [0, 50, 100, 150, 200, 250, 300, 400, 500];
+
+        // Função para atualizar otimizações via PyQt
+        function setOptimizations(opts) {
+            console.log('Otimizações recebidas:', opts);
+            OPTIMIZATIONS.preloadCoastlines = opts.preload_coastlines || false;
+            OPTIMIZATIONS.preloadAges = opts.preload_ages || false;
+            OPTIMIZATIONS.interpolation = opts.interpolation || false;
+            OPTIMIZATIONS.fastRender = opts.fast_render || false;
+
+            // Se ativar preload de coastlines, iniciar carregamento
+            if (OPTIMIZATIONS.preloadCoastlines && Object.keys(preloadedCoastlines).length === 0) {
+                preloadAllCoastlines();
+            }
+        }
+
+        // Pré-carregar coastlines principais
+        async function preloadAllCoastlines() {
+            console.log('Iniciando pré-carregamento de coastlines...');
+            const models = ['MULLER2022'];  // Modelo principal primeiro
+
+            for (const model of models) {
+                for (const age of PRELOAD_AGES) {
+                    const cacheKey = `${model}_${age}`;
+                    if (!preloadedCoastlines[cacheKey]) {
+                        try {
+                            const url = `${LOCAL_PROXY}/reconstruct/coastlines/?time=${age}&model=${model}`;
+                            const response = await fetch(url);
+                            if (response.ok) {
+                                preloadedCoastlines[cacheKey] = await response.json();
+                                console.log(`  Preloaded: ${model} ${age} Ma`);
+                            }
+                        } catch (e) {
+                            console.log(`  Erro preload: ${model} ${age} Ma`);
+                        }
+                    }
+                }
+            }
+            console.log('Pré-carregamento concluído:', Object.keys(preloadedCoastlines).length, 'coastlines');
+        }
 
         // Controle de velocidade - velocidade inicial 10x para visualização clara
         let simulationSpeed = 10.0;  // Velocidade padrao (viagem completa em ~12 segundos)
@@ -5115,6 +5168,7 @@ class SimulatorPanel(QWidget):
     view_changed = pyqtSignal(str)
     preset_changed = pyqtSignal(dict)  # Emitido quando usuario seleciona preset
     selection_mode_changed = pyqtSignal(bool)  # Emitido quando modo de selecao muda
+    optimization_changed = pyqtSignal(dict)  # Emitido quando otimizacoes mudam
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5296,12 +5350,48 @@ class SimulatorPanel(QWidget):
 
         layout.addStretch()
 
+        # Grupo de Otimizações (Feature Flags)
+        opt_group = QGroupBox("⚡ Otimizações")
+        opt_group.setStyleSheet(self._group_style())
+        opt_layout = QVBoxLayout(opt_group)
+
+        self.opt_preload_coastlines = QCheckBox("Pré-carregar coastlines")
+        self.opt_preload_coastlines.setChecked(False)
+        self.opt_preload_coastlines.setToolTip("Carrega coastlines principais ao iniciar (usa mais memória)")
+        self.opt_preload_coastlines.setStyleSheet("color: #e6edf3; font-size: 11px;")
+        opt_layout.addWidget(self.opt_preload_coastlines)
+
+        self.opt_preload_ages = QCheckBox("Pré-carregar próximas idades")
+        self.opt_preload_ages.setChecked(False)
+        self.opt_preload_ages.setToolTip("Durante animação, carrega próximas idades em background")
+        self.opt_preload_ages.setStyleSheet("color: #e6edf3; font-size: 11px;")
+        opt_layout.addWidget(self.opt_preload_ages)
+
+        self.opt_interpolation = QCheckBox("Interpolar do cache")
+        self.opt_interpolation.setChecked(False)
+        self.opt_interpolation.setToolTip("Usa interpolação bilinear para coordenadas não cacheadas")
+        self.opt_interpolation.setStyleSheet("color: #e6edf3; font-size: 11px;")
+        opt_layout.addWidget(self.opt_interpolation)
+
+        self.opt_fast_render = QCheckBox("Renderização otimizada")
+        self.opt_fast_render.setChecked(False)
+        self.opt_fast_render.setToolTip("Simplifica coastlines e usa cache de renderização")
+        self.opt_fast_render.setStyleSheet("color: #e6edf3; font-size: 11px;")
+        opt_layout.addWidget(self.opt_fast_render)
+
+        # Conectar sinais para aplicar otimizações
+        self.opt_preload_coastlines.toggled.connect(self._on_optimization_changed)
+        self.opt_preload_ages.toggled.connect(self._on_optimization_changed)
+        self.opt_interpolation.toggled.connect(self._on_optimization_changed)
+        self.opt_fast_render.toggled.connect(self._on_optimization_changed)
+
+        layout.addWidget(opt_group)
+
         # Info
         info_label = QLabel(
             "• Clique no mapa 2D para definir coordenadas\n"
             "• A trajetória mostra o caminho do fóssil\n"
-            "• A elipse laranja é o envelope de incerteza\n"
-            "• Cores indicam confiança da reconstrução"
+            "• Otimizações podem melhorar performance"
         )
         info_label.setStyleSheet("color: #6e7681; font-size: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;")
         info_label.setWordWrap(True)
@@ -5438,6 +5528,26 @@ class SimulatorPanel(QWidget):
             # Atualizar modelos disponiveis
             self._update_available_models(mid_age)
 
+    def _on_optimization_changed(self):
+        """Emite sinal quando opcoes de otimizacao mudam."""
+        opts = {
+            'preload_coastlines': self.opt_preload_coastlines.isChecked(),
+            'preload_ages': self.opt_preload_ages.isChecked(),
+            'interpolation': self.opt_interpolation.isChecked(),
+            'fast_render': self.opt_fast_render.isChecked(),
+        }
+        print(f"Otimizações alteradas: {opts}")
+        self.optimization_changed.emit(opts)
+
+    def get_optimization_settings(self):
+        """Retorna configurações atuais de otimização."""
+        return {
+            'preload_coastlines': self.opt_preload_coastlines.isChecked(),
+            'preload_ages': self.opt_preload_ages.isChecked(),
+            'interpolation': self.opt_interpolation.isChecked(),
+            'fast_render': self.opt_fast_render.isChecked(),
+        }
+
     def _on_select_map_toggled(self, checked):
         """Ativa/desativa modo de selecao no mapa."""
         self.coord_status.setVisible(checked)
@@ -5514,6 +5624,7 @@ class MainWindow(QMainWindow):
         self.visualization.point_selected.connect(self.panel.on_point_selected)
         self.visualization.capture_requested.connect(self._on_capture_requested)
         self.panel.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.panel.optimization_changed.connect(self._on_optimization_changed)
 
         # Disparar preset inicial para mostrar na timeline
         self.panel._on_preset_changed(0)
@@ -5565,6 +5676,14 @@ class MainWindow(QMainWindow):
         model_name = self.panel.model_combo.currentData()
         js = f"if(window.setRotationModel) window.setRotationModel('{model_name}');"
         self.visualization.web_view.page().runJavaScript(js)
+
+    def _on_optimization_changed(self, opts: dict):
+        """Atualiza configuracoes de otimizacao na visualizacao."""
+        import json
+        opts_json = json.dumps(opts)
+        js = f"if(window.setOptimizations) window.setOptimizations({opts_json});"
+        self.visualization.web_view.page().runJavaScript(js)
+        self.statusBar().showMessage(f"Otimizações atualizadas: {opts}")
 
     def _apply_theme(self):
         palette = QPalette()
